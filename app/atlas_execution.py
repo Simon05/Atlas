@@ -7,6 +7,9 @@ class Execution:
  def __init__(self,manifest,here,*,home=None,runner=None,engine_path=None):
   self.manifest=manifest;self.here=Path(here).resolve();self.home=Path(home) if home else Path.home();self.root=Path(manifest['root']);self.units={u['path']:u for u in manifest['units']};self.token=secrets.token_urlsafe(32);self.lock=threading.RLock();self.jobs={};self.runner=runner or self._subprocess;self.runs=self.here/'runs';self.engine_path=Path(engine_path) if engine_path else self.here/'apply_plan.py'
   engine.no_links(self.runs)
+  self.links_by_unit={}
+  for r in manifest.get('records',[]):
+   if r.get('kind')=='link':self.links_by_unit.setdefault(r['path'].split('/')[0],[]).append(r['path'])
   if self.runs.exists():
    for p in self.runs.glob('*/job.json'):
     try:
@@ -29,7 +32,7 @@ class Execution:
  def _applied(self,j,events=None):
   events=self._events(j) if events is None else events;undone={e['id'] for e in events if e['event']=='undone'}
   intents={e['id']:e for e in events if e['event']=='intent'};done={e['id'] for e in events if e['event']=='done'}
-  return [e for ident,e in intents.items() if ident not in undone and (ident in done or not Path(e['source']).exists() and Path(e['destination']).exists())]
+  return [e for ident,e in intents.items() if ident not in undone and (ident in done or not engine.present(Path(e['source'])) and engine.present(Path(e['destination'])))]
  def applied_map(self,events_by_id=None):
   result={}
   for j in sorted(self.jobs.values(),key=lambda j:j['createdAt']):
@@ -39,11 +42,11 @@ class Execution:
   return result
  def public(self,j,events=None,global_applied=None):
   events=self._events(j) if events is None else events;applied=self._applied(j,events);done={e['id'] for e in events if e['event']=='done'};undone={e['id'] for e in events if e['event']=='undone'};completed=[e for e in events if e['event']=='done'];sources={Path(e['source']).name for e in applied};actions=j['actions'];global_applied=self.applied_map() if global_applied is None else global_applied;external={a['source'] for a in actions if a['source'] in global_applied and global_applied[a['source']]['jobId']!=j['id']};pending=[a for a in actions if a['source'] not in sources and a['source'] not in external];restoring=bool(undone) or j['state'] in {'undoing','restore-paused','restored'}
-  return {k:j.get(k) for k in ['id','state','createdAt','destinationRoot','error','output','verified','reviewToken']}|{'actions':actions,'appliedCount':len(applied),'total':len(actions),'nextBatch':pending if not restoring else [],'restoreBatch':[{'source':Path(e['source']).name,'action':e['action'],'destination':e['destination']} for e in reversed(applied)],'applied':list(sources),'completedElsewhere':len(external),'canApply':j['state'] in {'ready','paused'} and not restoring and bool(pending),'canUndo':bool(applied) and j['state'] not in BUSY,'journal':str(self._folder(j['id'])/'undo-log.jsonl'),'canInspectJournal':bool(events),'hasUndoHistory':restoring,'operationTotal':len(j.get('activeSources') or actions),'operationCompleted':sum((p not in sources if j['state'] in {'undoing','restore-paused','restored'} else p in global_applied) for p in (j.get('activeSources') or [a['source'] for a in actions])),'operationKind':j.get('activeScope','all')}
+  return {k:j.get(k) for k in ['id','state','createdAt','destinationRoot','error','output','verified','reviewToken','issues']}|{'actions':actions,'appliedCount':len(applied),'total':len(actions),'nextBatch':pending if not restoring else [],'restoreBatch':[{'source':Path(e['source']).name,'action':e['action'],'destination':e['destination']} for e in reversed(applied)],'applied':list(sources),'completedElsewhere':len(external),'canApply':j['state'] in {'ready','paused'} and not restoring and bool(pending),'canUndo':bool(applied) and j['state'] not in BUSY,'journal':str(self._folder(j['id'])/'undo-log.jsonl'),'canInspectJournal':bool(events),'hasUndoHistory':restoring,'operationTotal':len(j.get('activeSources') or actions),'operationCompleted':sum((p not in sources if j['state'] in {'undoing','restore-paused','restored'} else p in global_applied) for p in (j.get('activeSources') or [a['source'] for a in actions])),'operationKind':j.get('activeScope','all')}
  def snapshot(self):
   with self.lock:
    events={j['id']:self._events(j) for j in self.jobs.values()};global_applied=self.applied_map(events)
-   return {'protocolVersion':3,'connected':True,'busy':any(j['state'] in BUSY for j in self.jobs.values()),'jobs':[self.public(j,events[j['id']],global_applied) for j in sorted(self.jobs.values(),key=lambda j:j['createdAt'],reverse=True)],'applied':global_applied}
+   return {'protocolVersion':3,'symlinkTrashOverride':True,'connected':True,'busy':any(j['state'] in BUSY for j in self.jobs.values()),'jobs':[self.public(j,events[j['id']],global_applied) for j in sorted(self.jobs.values(),key=lambda j:j['createdAt'],reverse=True)],'applied':global_applied}
 
  def reveal_path(self,key):
   if not isinstance(key,str):raise ValueError('Choose a scanned item.')
@@ -74,7 +77,7 @@ class Execution:
   if not any((self.home/n) in path.parents for n in ('Documents','Desktop','Movies','Pictures','Music')):raise ValueError('Choose or create a dedicated subfolder inside Documents, Desktop, Movies, Pictures, or Music.')
   if path==self.root or self.root in path.parents or path in self.root.parents:raise ValueError('The destination must be outside the folder you are organizing.')
   return {'path':str(path)}
- def canonical(self,plan,allow_projects):
+ def canonical(self,plan,allow_projects,allow_symlink_trash=False):
   if self.manifest.get('rootProject'):raise ValueError('This folder is itself a project. Scan its parent to organize the whole project without splitting its contents.')
   if not isinstance(plan,dict) or plan.get('schemaVersion')!=1 or plan.get('sourceRoot')!=str(self.root):raise ValueError('The plan does not match this folder snapshot.')
   value=plan.get('destinationRoot')
@@ -91,7 +94,10 @@ class Execution:
    if source in seen or source not in self.units:raise ValueError('Unknown or repeated source in the plan.')
    seen.add(source);u=self.units[source]
    if source in applied:raise ValueError('Already applied: '+source+'. Restore this item before creating another action for it.')
-   if not u['hashComplete'] or u.get('kind')=='link' or any('symbolic link' in w for w in u.get('warnings',[])):raise ValueError('This source contains a symbolic link or has an incomplete scan: '+source)
+   if not u['hashComplete']:raise ValueError('This source has an incomplete scan: '+source)
+   has_links=u.get('kind')=='link' or source in self.links_by_unit or any('symbolic link' in w for w in u.get('warnings',[]))
+   link_override=has_links and action.get('allowSymlinkTrash') is True and allow_symlink_trash and action.get('action')=='trash'
+   if has_links and not link_override:raise ValueError('Explicit symbolic-link Trash confirmation is required; moving linked items is not enabled: '+source)
    if action.get('fingerprint')!=u['fingerprint']:raise ValueError('The source fingerprint does not match the snapshot: '+source)
    if action.get('action') not in ('trash','move'):raise ValueError('Only Move and Trash actions can be applied.')
    if u.get('locked') and not allow_projects:raise ValueError('Review project warnings and explicitly enable project actions before verification.')
@@ -102,15 +108,25 @@ class Execution:
    if not isinstance(reviewed_copies,list) or any(not isinstance(p,str) for p in reviewed_copies):raise ValueError('Invalid related-copy acknowledgement.')
    discard=action.get('discardRetained') is True
    if discard and not set(retained).issubset(set(reviewed_copies)):raise ValueError('Confirm the exact related copies before discarding both.')
-   actions.append(dict(source=source,action=action['action'],destination=destination,bytes=u['bytes'],fingerprint=u['fingerprint'],hashComplete=True,locked=bool(u.get('locked')),warnings=u.get('warnings',[]),reviewed=bool(action.get('reviewed')),discardRetained=discard,reviewedCopies=[r for r in retained if r in reviewed_copies] if discard else [],retain=retained,retainFingerprints={r:self.units[r]['fingerprint'] for r in retained}))
+   clean_action=dict(source=source,action=action['action'],destination=destination,bytes=u['bytes'],fingerprint=u['fingerprint'],hashComplete=True,locked=bool(u.get('locked')),warnings=u.get('warnings',[]),reviewed=bool(action.get('reviewed')),discardRetained=discard,reviewedCopies=[r for r in retained if r in reviewed_copies] if discard else [],retain=retained,retainFingerprints={r:self.units[r]['fingerprint'] for r in retained})
+   if link_override:
+    targets={}
+    for rel in self.links_by_unit.get(source,[]):
+     path=self.root/engine.cleanrel(rel);engine.no_links(path.parent)
+     if not path.is_symlink():raise ValueError('Symbolic link changed since scan: '+rel)
+     targets['' if rel==source else rel[len(source)+1:]]=os.readlink(path)
+    if not targets:raise ValueError('This snapshot lacks link metadata. Scan the parent folder again before overriding: '+source)
+    clean_action.update(allowSymlinkTrash=True,symlinkTargets=targets)
+   actions.append(clean_action)
   return dict(schemaVersion=1,sourceRoot=str(self.root),destinationRoot=str(dest),scannedAt=self.manifest['scannedAt'],actions=actions)
- def verify(self,plan,allow_projects=False):
+ def verify(self,plan,allow_projects=False,allow_symlink_trash=False):
   with self.lock:
    if any(j['state'] in BUSY for j in self.jobs.values()):raise ValueError('Another verification or batch is running. Wait for it to finish.')
-   clean=self.canonical(plan,bool(allow_projects));ident=uuid.uuid4().hex;j=dict(id=ident,createdAt=time.time(),state='verifying',destinationRoot=clean['destinationRoot'],actions=clean['actions'],allowProjects=bool(allow_projects),output=[],verified=0,error=None,reviewToken=secrets.token_urlsafe(24));self.jobs[ident]=j;self._save(j);p=self._folder(ident)/'plan.json';p.write_text(json.dumps(clean,ensure_ascii=False));os.chmod(p,0o600);self._start(j,'verify');return self.public(j)
+   clean=self.canonical(plan,bool(allow_projects),bool(allow_symlink_trash));ident=uuid.uuid4().hex;j=dict(id=ident,createdAt=time.time(),state='verifying',destinationRoot=clean['destinationRoot'],actions=clean['actions'],allowProjects=bool(allow_projects),allowSymlinkTrash=bool(allow_symlink_trash),output=[],verified=0,error=None,reviewToken=secrets.token_urlsafe(24));self.jobs[ident]=j;self._save(j);p=self._folder(ident)/'plan.json';p.write_text(json.dumps(clean,ensure_ascii=False));os.chmod(p,0o600);self._start(j,'verify');return self.public(j)
  def command(self,j,mode):
   folder=self._folder(j['id']);cmd=[sys.executable,str(self.engine_path)];cmd+=['--undo',str(folder/'undo-log.jsonl')] if mode=='undo' else [str(folder/'plan.json'),'--log',str(folder/'undo-log.jsonl')];cmd+=['--source-root',str(self.root),'--destination-root',j['destinationRoot']]
   if j['allowProjects']:cmd+=['--allow-project-actions']
+  if j.get('allowSymlinkTrash'):cmd+=['--allow-symlink-trash']
   if mode!='verify':cmd+=['--apply','--yes']
   if mode=='apply':cmd+=['--sources-file',str(folder/'selection.json')]
   if mode=='apply' and j.get('activeScope') in ('trash','move'):cmd+=['--only-action',j['activeScope']]
@@ -122,6 +138,11 @@ class Execution:
  def _start(self,j,mode):
   def work():
    try:
+    if mode=='verify':
+     missing=[dict(kind='missing',source=a['source']) for a in j['actions'] if not engine.present(self.root/a['source'])]
+     if missing:
+      j['issues']=missing
+      raise ValueError(str(len(missing))+' marked items are no longer at their scanned paths. Remove them from this plan before continuing.')
     def on_line(line):
      with self.lock:
       j['output']=(j.get('output',[])+[line])[-14:]

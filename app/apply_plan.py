@@ -5,7 +5,7 @@ from pathlib import Path
 MARKERS={'.prproj','.aep','.fig','.sketch','.psd','.ai'}
 def digest(p):
  h=hashlib.sha256()
- with p.open('rb') as f:
+ with os.fdopen(os.open(p,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)),'rb') as f:
   for b in iter(lambda:f.read(1024*1024),b''):h.update(b)
  return h.hexdigest()
 def cleanrel(s,unit=False):
@@ -20,31 +20,39 @@ def no_links(p):
   if q.is_symlink():raise ValueError('Symbolic link is not allowed: '+str(q))
  return p
 
-def fingerprint(p):
- no_links(p)
- if not p.exists():raise ValueError('Missing source: '+str(p))
+def present(p):return os.path.lexists(p)
+
+def fingerprint(p,symlink_targets=None):
+ # Only an explicit Trash override supplies a nonempty, pinned link inventory.
+ links_allowed=isinstance(symlink_targets,dict) and bool(symlink_targets)
+ no_links(p.parent if links_allowed else p)
+ if not present(p):raise ValueError('Missing source: '+str(p))
  paths=[p]
- if p.is_dir():
+ if not p.is_symlink() and p.is_dir():
   for root,ds,fs in os.walk(p,followlinks=False):
    paths.extend(Path(root,n) for n in ds+fs)
- rows=[];locked=False
+ rows=[];locked=False;observed={}
  for q in paths:
-  if q.is_symlink():raise ValueError('Symbolic link in source: '+str(q))
   rel='' if q==p else q.relative_to(p).as_posix()
-  if q.is_dir():kind,size,h='dir',0,''
+  no_links(q.parent)
+  if q.is_symlink():
+   if not links_allowed:raise ValueError('Symbolic link in source: '+str(q))
+   observed[rel]=os.readlink(q);kind,size,h='link',0,''
+  elif q.is_dir():kind,size,h='dir',0,''
   elif q.is_file():
    before=q.stat();kind,size,h='file',before.st_size,digest(q);after=q.stat()
    if (before.st_size,before.st_mtime_ns)!=(after.st_size,after.st_mtime_ns):raise ValueError('File changed during verification: '+str(q))
    locked |= q.suffix.lower() in MARKERS or q.name=='package.json'
   else:raise ValueError('Unsupported special file: '+str(q))
   rows.append((rel,kind,size,h))
+ if links_allowed and observed!=symlink_targets:raise ValueError('Symbolic links changed since verification: '+str(p))
  h=hashlib.sha256()
  for row in sorted(rows,key=lambda r:r[0]):h.update((json.dumps(row,ensure_ascii=False,separators=(',',':'))+'\n').encode())
  return h.hexdigest(),locked
 
-def rename_exclusive(src,dst):
+def rename_exclusive(src,dst,allow_symlink=False):
  """Kernel-enforced no overwrite, never copy/delete or cross volume."""
- no_links(src);no_links(dst.parent)
+ no_links(src.parent if allow_symlink else src);no_links(dst.parent)
  if dst.exists() or dst.is_symlink():raise FileExistsError(str(dst))
  libc=ctypes.CDLL(None,use_errno=True)
  if sys.platform=='darwin':
@@ -77,25 +85,28 @@ def undo(args):
  n=0
  for op in reversed(list(intents.values())):
   if op['id'] in undone:continue
-  src,dst=no_links(Path(op['source'])),no_links(Path(op['destination']))
+  src,dst=Path(op['source']),Path(op['destination'])
   allowed_source=no_links(Path(args.source_root).absolute());allowed_dest=no_links(Path(args.destination_root).absolute());allowed_trash=no_links(Path.home()/'.Trash')
+  link_override=op.get('allowSymlinkTrash') is True and op.get('action')=='trash' and dst.parent==allowed_trash
+  targets=op.get('symlinkTargets') if link_override else None
+  no_links(src.parent if link_override else src);no_links(dst.parent if link_override else dst)
   check_under(src,allowed_source)
   if src.parent!=allowed_source:raise ValueError('Undo source must be a top-level decision unit')
   if allowed_dest not in dst.parents and dst.parent!=allowed_trash:raise ValueError('Undo destination outside allowed roots')
   # A journal can contain a pending intent if interrupted just before/after rename.
-  if src.exists() and not dst.exists():
-   if fingerprint(src)[0]!=op['fingerprint']:raise ValueError('Original path contains changed content; undo refused: '+str(src))
+  if present(src) and not present(dst):
+   if fingerprint(src,targets)[0]!=op['fingerprint']:raise ValueError('Original path contains changed content; undo refused: '+str(src))
    print('Already at original location:',src)
    if args.apply:append(log,dict(event='undone',id=op['id'],note='already-original'))
    continue
-  if src.exists() or not dst.exists():raise ValueError('Ambiguous journal state; inspect manually: '+str(src))
-  if fingerprint(dst)[0]!=op['fingerprint']:raise ValueError('Moved item changed; undo refused: '+str(dst))
+  if present(src) or not present(dst):raise ValueError('Ambiguous journal state; inspect manually: '+str(src))
+  if fingerprint(dst,targets)[0]!=op['fingerprint']:raise ValueError('Moved item changed; undo refused: '+str(dst))
   print('UNDO',dst,'→',src)
   if args.apply:
    no_links(src.parent)
    if not src.parent.is_dir():raise ValueError('Original parent missing')
    append(log,dict(event='undo-intent',id=op['id']))
-   rename_exclusive(dst,src);append(log,dict(event='undone',id=op['id']))
+   rename_exclusive(dst,src,allow_symlink=link_override);append(log,dict(event='undone',id=op['id']))
   n+=1
   if getattr(args,'max_actions',None) and n>=args.max_actions:break
   if n%args.batch_size==0 and not args.yes and input('Continue next undo batch? [y/N] ').lower()!='y':break
@@ -134,6 +145,10 @@ def run(args):
   if str(src) in sources:raise ValueError('Duplicate source in plan')
   sources.add(str(src))
   if a['action'] not in ('move','trash'):raise ValueError('Unsupported action')
+  link_override=a.get('allowSymlinkTrash') is True
+  if link_override and (a['action']!='trash' or not getattr(args,'allow_symlink_trash',False)):raise ValueError('Symbolic-link Trash requires explicit --allow-symlink-trash; moving linked units is not enabled')
+  link_targets=a.get('symlinkTargets') if link_override else None
+  if link_override and (not isinstance(link_targets,dict) or not link_targets or any(not isinstance(k,str) or not isinstance(v,str) for k,v in link_targets.items())):raise ValueError('Check the symbolic links in Atlas before applying or exporting this plan')
   if not a.get('hashComplete'):raise ValueError('Incomplete scan: '+str(src))
   for retained in a.get('retain',[]):
    retained=str(cleanrel(retained,unit=True))
@@ -153,7 +168,7 @@ def run(args):
   key=unicodedata.normalize('NFC',str(dst)).casefold()
   if key in targets or dst.exists():raise ValueError('Destination collision: '+str(dst))
   targets.add(key)
-  print('VERIFY',src,flush=True);fp,locked=fingerprint(src)
+  print('VERIFY',src,flush=True);fp,locked=fingerprint(src,link_targets)
   if fp!=a['fingerprint']:raise ValueError('Source changed since scan: '+str(src))
   if (locked or a.get('locked')) and not args.allow_project_actions:raise ValueError('Project action requires --allow-project-actions after reviewing linked assets: '+str(src))
   if (a.get('warnings') or locked) and not a.get('reviewed'):raise ValueError('Warnings not reviewed in app: '+str(src))
@@ -181,15 +196,17 @@ def run(args):
     keep=Path(moved[-1]['destination'])
    if fingerprint(keep)[0]!=a['retainFingerprints'][retained]:raise ValueError('Retained copy changed: '+retained)
   no_links(dst.parent);dst.parent.mkdir(parents=True,exist_ok=True);no_links(dst.parent)
-  if src.stat().st_dev!=dst.parent.stat().st_dev:raise ValueError('Cross-volume move refused')
+  if src.lstat().st_dev!=dst.parent.stat().st_dev:raise ValueError('Cross-volume move refused')
   # Verify again immediately before the journal and atomic rename.
-  if fingerprint(src)[0]!=a['fingerprint']:raise ValueError('Source changed after preflight: '+str(src))
+  link_override=a.get('allowSymlinkTrash') is True
+  if fingerprint(src,a.get('symlinkTargets') if link_override else None)[0]!=a['fingerprint']:raise ValueError('Source changed after preflight: '+str(src))
   ident=uuid.uuid4().hex;event=dict(id=ident,plan=planid,source=str(src),destination=str(dst),fingerprint=a['fingerprint'],action=a['action'])
-  append(log,dict(event='intent',**event));rename_exclusive(src,dst);append(log,dict(event='done',**event));n+=1;print('APPLIED',a['action'],src.name,flush=True)
+  if link_override:event.update(allowSymlinkTrash=True,symlinkTargets=a['symlinkTargets'])
+  append(log,dict(event='intent',**event));rename_exclusive(src,dst,allow_symlink=link_override);append(log,dict(event='done',**event));n+=1;print('APPLIED',a['action'],src.name,flush=True)
  print('Applied',n,'actions. Journal:',log)
 
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('plan',nargs='?');p.add_argument('--apply',action='store_true');p.add_argument('--undo',metavar='LOG');p.add_argument('--source-root',default=str(Path.home()/'Downloads'));p.add_argument('--destination-root',default=str(Path.home()/'Documents'/'Organized Downloads'));p.add_argument('--log',default=str(Path(__file__).resolve().parent/'undo-log.jsonl'));p.add_argument('--batch-size',type=int,default=25);p.add_argument('--sources-file',help='JSON list of reviewed source names to apply from this plan');p.add_argument('--only-action',choices=['trash','move'],help='Apply only this action type from the plan');p.add_argument('--max-actions',type=int,help='Apply or undo at most this many actions');p.add_argument('--yes',action='store_true',help='Skip batch prompts');p.add_argument('--allow-project-actions',action='store_true');args=p.parse_args()
+ p=argparse.ArgumentParser(description=__doc__);p.add_argument('plan',nargs='?');p.add_argument('--apply',action='store_true');p.add_argument('--undo',metavar='LOG');p.add_argument('--source-root',default=str(Path.home()/'Downloads'));p.add_argument('--destination-root',default=str(Path.home()/'Documents'/'Organized Downloads'));p.add_argument('--log',default=str(Path(__file__).resolve().parent/'undo-log.jsonl'));p.add_argument('--batch-size',type=int,default=25);p.add_argument('--sources-file',help='JSON list of reviewed source names to apply from this plan');p.add_argument('--only-action',choices=['trash','move'],help='Apply only this action type from the plan');p.add_argument('--max-actions',type=int,help='Apply or undo at most this many actions');p.add_argument('--yes',action='store_true',help='Skip batch prompts');p.add_argument('--allow-project-actions',action='store_true');p.add_argument('--allow-symlink-trash',action='store_true',help='Allow explicitly reviewed link-containing items to go to Trash without following their links');args=p.parse_args()
  if args.max_actions is not None and args.max_actions<1:p.error('--max-actions must be positive')
  if args.batch_size<1:p.error('--batch-size must be positive')
  if not args.undo and not args.plan:p.error('Provide a plan JSON, or --undo LOG')

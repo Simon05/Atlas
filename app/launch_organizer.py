@@ -36,7 +36,7 @@ class Handler(BaseHTTPRequestHandler):
    if route=='/api/cancel-scan':self.respond(self.server.sources.stop(body.get('id')));return
    if route=='/api/reveal':self.respond(service.reveal(body.get('path')));return
    if route=='/api/choose-destination':self.respond(service.choose_destination());return
-   if route=='/api/verify':result=service.verify(body.get('plan'),body.get('allowProjects') is True)
+   if route=='/api/verify':result=service.verify(body.get('plan'),body.get('allowProjects') is True,body.get('allowSymlinkTrash') is True)
    elif route in ('/api/apply','/api/undo'):
     mode='apply' if route.endswith('/apply') else 'undo'
     if body.get('confirmation')!=('APPLY' if mode=='apply' else 'RESTORE'):raise ValueError('Review and explicitly confirm these actions first.')
