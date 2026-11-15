@@ -1,0 +1,30 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Build UI
+        run: python3 scripts/build.py --template-only
+      - name: Check generated template
+        run: git diff --exit-code -- app/atlas-template.html
+      - name: Check browser logic with synthetic data
+        run: |
+          node --check work/atlas.js
+          node tests/cleanup.cjs
+      - name: Check scanner and recoverable operations
+        run: python3 -m unittest discover -s tests

@@ -1,0 +1,14 @@
+.atlas/
+work/
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+.env
+outputs/
+.env.*
+!.env.example
+*.log
+*.atlas-plan.json
+*.atlas-context.json
+*.atlas-proposal.json

@@ -1,0 +1,2 @@
+# Optional image/font previews; core scanning and cleanup use Python's standard library.
+Pillow>=10,<13
