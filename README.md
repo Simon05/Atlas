@@ -148,6 +148,8 @@ control what a separate agent reads or transmits.
 
 - Scans are snapshots; reopening a saved folder does not silently rescan it.
 - Projects outside the scan, dynamic references and unsupported formats can be missed.
+- Items containing symbolic links require a per-item Trash override and final confirmation. Atlas moves the intact item without following its links; targets stay untouched. Link destinations are checked again before applying and restoring. Moving linked items remains blocked.
+- Missing items can be removed from the plan together after checking; this never changes files.
 - All top-level folders remain intact decision units. Scan a project's parent to organize the entire project.
 - Moves currently require the same volume and a dedicated destination under common personal folders. Restore refuses changed files and occupied original paths.
 - macOS is the execution target. Windows/Linux file operations are not validated.
