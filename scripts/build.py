@@ -4,8 +4,9 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1];UI=ROOT/'ui';APP=ROOT/'app'
 (ROOT/'work').mkdir(exist_ok=True)
 s=(UI/'atlas.html').read_text()
-for key,file in [('UX','atlas-ux'),('PLAN_FLOW','plan-flow'),('SOURCES','sources'),('CONNECTION','connections'),('CLEANUP','cleanup'),('OVERVIEW','overview')]:
+for key,file in [('UX','atlas-ux'),('PLAN_FLOW','plan-flow'),('SOURCES','sources'),('CONNECTION','connections'),('CLEANUP','cleanup'),('OVERVIEW','overview'),('REFRESH','refresh')]:
  for kind,ext in [('STYLE','css'),('SCRIPT','js')]:s=s.replace('__'+key+'_'+kind+'__',(UI/(file+'.'+ext)).read_text())
+s=s.replace('__SCAN_STATE_SCRIPT__',(UI/'scan-state.js').read_text())
 (APP/'atlas-template.html').write_text(s)
 (ROOT/'work'/'atlas.js').write_text("'use strict';\n"+s.split("<script>\n'use strict';")[1].split('</script>')[0])
 def thumbs(path):

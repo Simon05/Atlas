@@ -33,6 +33,7 @@ class Handler(BaseHTTPRequestHandler):
    route=urlparse(self.path).path;service=self.context()['service']
    if route=='/api/choose-source':self.respond(self.server.sources.choose());return
    if route=='/api/scan-source':self.respond(self.server.sources.start(body.get('path')));return
+   if route=='/api/refresh-source':self.respond(self.server.sources.refresh(self.context()['id']));return
    if route=='/api/cancel-scan':self.respond(self.server.sources.stop(body.get('id')));return
    if route=='/api/reveal':self.respond(service.reveal(body.get('path')));return
    if route=='/api/choose-destination':self.respond(service.choose_destination());return

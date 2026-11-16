@@ -40,3 +40,12 @@ $('final-project-ack').checked=true;$('final-project-ack').onchange();assert.equ
 $('final-link-ack').checked=true;$('final-link-ack').onchange();assert.equal($('act1').disabled,false);
 `,c);
 console.log('Progress checks passed: preparing, live counts, completion, partial failure, specific-run success, and confirmation gates.');
+// The folder chooser can share the Downloads root key; it must not overwrite an existing plan.
+const rootKey='downloads-organizer-v1:'+fixture.scan.root;
+const bootstrapStorage=new Map([[rootKey,'saved-plan'],[rootKey+':history','saved-history'],[rootKey+':applied','saved-applied']]);
+const bootstrapElements=new Map();
+const bootstrapContext={...c,document:{...c.document,getElementById(id){if(!bootstrapElements.has(id))bootstrapElements.set(id,{...el(id),textContent:id==='snapshot'?JSON.stringify({...fixture.scan,bootstrap:true}):el(id).textContent});return bootstrapElements.get(id)}},localStorage:{getItem:k=>bootstrapStorage.get(k),setItem:(k,v)=>bootstrapStorage.set(k,v)}};
+vm.createContext(bootstrapContext);vm.runInContext(fs.readFileSync('work/atlas.js','utf8').replace(/render\(\);\s*$/,''),bootstrapContext,{timeout:20000});
+vm.runInContext('persistBeforeSwitch();updateExecution({protocolVersion:3,applied:{},jobs:[]})',bootstrapContext);
+assert.deepEqual([...bootstrapStorage],[[rootKey,'saved-plan'],[rootKey+':history','saved-history'],[rootKey+':applied','saved-applied']]);
+console.log('Bootstrap preserves existing browser decisions, history, and applied-item cache.');

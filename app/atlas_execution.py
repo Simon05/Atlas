@@ -6,7 +6,7 @@ BUSY={'verifying','applying','undoing'}
 class Execution:
  def __init__(self,manifest,here,*,home=None,runner=None,engine_path=None):
   self.manifest=manifest;self.here=Path(here).resolve();self.home=Path(home) if home else Path.home();self.root=Path(manifest['root']);self.units={u['path']:u for u in manifest['units']};self.token=secrets.token_urlsafe(32);self.lock=threading.RLock();self.jobs={};self.runner=runner or self._subprocess;self.runs=self.here/'runs';self.engine_path=Path(engine_path) if engine_path else self.here/'apply_plan.py'
-  engine.no_links(self.runs)
+  engine.no_links(self.runs);self.refreshing=False
   self.links_by_unit={}
   for r in manifest.get('records',[]):
    if r.get('kind')=='link':self.links_by_unit.setdefault(r['path'].split('/')[0],[]).append(r['path'])
@@ -16,6 +16,9 @@ class Execution:
      engine.no_links(p);job=json.loads(p.read_text());ident=job['id']
      if len(ident)!=32 or any(c not in '0123456789abcdef' for c in ident) or p.parent.name!=ident:continue
      if job['state'] in BUSY:job.update(state='failed',error='The local server restarted during this operation. Review the journal before restoring or verifying a new plan.')
+     if 'scannedAt' not in job:
+      plan=engine.no_links(p.parent/'plan.json')
+      if plan.exists():job['scannedAt']=json.loads(plan.read_text()).get('scannedAt')
      job['reviewToken']=secrets.token_urlsafe(24);self.jobs[ident]=job
     except (ValueError,OSError,KeyError):continue
  def _folder(self,ident):return self.runs/ident
@@ -38,15 +41,19 @@ class Execution:
   for j in sorted(self.jobs.values(),key=lambda j:j['createdAt']):
    for e in self._applied(j,None if events_by_id is None else events_by_id[j['id']]):
     source=Path(e['source'])
+    if self.manifest.get('refresh') and engine.present(source):continue
     if source.parent==self.root:result[source.name]={'jobId':j['id'],'destination':e['destination'],'action':e['action']}
   return result
  def public(self,j,events=None,global_applied=None):
   events=self._events(j) if events is None else events;applied=self._applied(j,events);done={e['id'] for e in events if e['event']=='done'};undone={e['id'] for e in events if e['event']=='undone'};completed=[e for e in events if e['event']=='done'];sources={Path(e['source']).name for e in applied};actions=j['actions'];global_applied=self.applied_map() if global_applied is None else global_applied;external={a['source'] for a in actions if a['source'] in global_applied and global_applied[a['source']]['jobId']!=j['id']};pending=[a for a in actions if a['source'] not in sources and a['source'] not in external];restoring=bool(undone) or j['state'] in {'undoing','restore-paused','restored'}
-  return {k:j.get(k) for k in ['id','state','createdAt','destinationRoot','error','output','verified','reviewToken','issues']}|{'actions':actions,'appliedCount':len(applied),'total':len(actions),'nextBatch':pending if not restoring else [],'restoreBatch':[{'source':Path(e['source']).name,'action':e['action'],'destination':e['destination']} for e in reversed(applied)],'applied':list(sources),'completedElsewhere':len(external),'canApply':j['state'] in {'ready','paused'} and not restoring and bool(pending),'canUndo':bool(applied) and j['state'] not in BUSY,'journal':str(self._folder(j['id'])/'undo-log.jsonl'),'canInspectJournal':bool(events),'hasUndoHistory':restoring,'operationTotal':len(j.get('activeSources') or actions),'operationCompleted':sum((p not in sources if j['state'] in {'undoing','restore-paused','restored'} else p in global_applied) for p in (j.get('activeSources') or [a['source'] for a in actions])),'operationKind':j.get('activeScope','all')}
+  current=j.get('scannedAt')==self.manifest['scannedAt'] or not self.manifest.get('refresh')
+  pending=[a for a in pending if a['source'] in self.units and a['fingerprint']==self.units[a['source']]['fingerprint'] and sorted(a.get('warnings',[]))==sorted(self.units[a['source']].get('warnings',[]))]
+  if not current:pending=[{**a,'allowSymlinkTrash':False,'reviewed':False} if a.get('allowSymlinkTrash') else a for a in pending]
+  return {k:j.get(k) for k in ['id','state','createdAt','destinationRoot','error','output','verified','reviewToken','issues']}|{'actions':actions,'scannedAt':j.get('scannedAt'),'snapshotCurrent':current,'appliedCount':len(applied),'total':len(actions),'nextBatch':pending if not restoring else [],'restoreBatch':[{'source':Path(e['source']).name,'action':e['action'],'destination':e['destination']} for e in reversed(applied)],'applied':list(sources),'completedElsewhere':len(external),'canApply':current and not self.refreshing and j['state'] in {'ready','paused'} and not restoring and bool(pending),'canUndo':bool(applied) and j['state'] not in BUSY and not self.refreshing,'journal':str(self._folder(j['id'])/'undo-log.jsonl'),'canInspectJournal':bool(events),'hasUndoHistory':restoring,'operationTotal':len(j.get('activeSources') or actions),'operationCompleted':sum((p not in sources if j['state'] in {'undoing','restore-paused','restored'} else p in global_applied) for p in (j.get('activeSources') or [a['source'] for a in actions])),'operationKind':j.get('activeScope','all')}
  def snapshot(self):
   with self.lock:
    events={j['id']:self._events(j) for j in self.jobs.values()};global_applied=self.applied_map(events)
-   return {'protocolVersion':3,'symlinkTrashOverride':True,'connected':True,'busy':any(j['state'] in BUSY for j in self.jobs.values()),'jobs':[self.public(j,events[j['id']],global_applied) for j in sorted(self.jobs.values(),key=lambda j:j['createdAt'],reverse=True)],'applied':global_applied}
+   return {'protocolVersion':3,'refreshScan':True,'refreshing':self.refreshing,'scannedAt':self.manifest['scannedAt'],'symlinkTrashOverride':True,'connected':True,'busy':self.refreshing or any(j['state'] in BUSY for j in self.jobs.values()),'jobs':[self.public(j,events[j['id']],global_applied) for j in sorted(self.jobs.values(),key=lambda j:j['createdAt'],reverse=True)],'applied':global_applied}
 
  def reveal_path(self,key):
   if not isinstance(key,str):raise ValueError('Choose a scanned item.')
@@ -78,8 +85,10 @@ class Execution:
   if path==self.root or self.root in path.parents or path in self.root.parents:raise ValueError('The destination must be outside the folder you are organizing.')
   return {'path':str(path)}
  def canonical(self,plan,allow_projects,allow_symlink_trash=False):
+  if self.refreshing:raise ValueError('The folder scan is refreshing. Wait for it to finish before checking or applying a plan.')
   if self.manifest.get('rootProject'):raise ValueError('This folder is itself a project. Scan its parent to organize the whole project without splitting its contents.')
   if not isinstance(plan,dict) or plan.get('schemaVersion')!=1 or plan.get('sourceRoot')!=str(self.root):raise ValueError('The plan does not match this folder snapshot.')
+  if self.manifest.get('refresh') and plan.get('scannedAt')!=self.manifest['scannedAt']:raise ValueError('The folder scan was refreshed. Reload Atlas before checking this plan.')
   value=plan.get('destinationRoot')
   if not isinstance(value,str) or '\x00' in value or not Path(value).is_absolute() or '..' in Path(value).parts:raise ValueError('Choose an absolute destination inside Documents, Desktop, Movies, Pictures or Music.')
   dest=engine.no_links(Path(value));allowed=[self.home/n for n in ('Documents','Desktop','Movies','Pictures','Music')]
@@ -122,7 +131,7 @@ class Execution:
  def verify(self,plan,allow_projects=False,allow_symlink_trash=False):
   with self.lock:
    if any(j['state'] in BUSY for j in self.jobs.values()):raise ValueError('Another verification or batch is running. Wait for it to finish.')
-   clean=self.canonical(plan,bool(allow_projects),bool(allow_symlink_trash));ident=uuid.uuid4().hex;j=dict(id=ident,createdAt=time.time(),state='verifying',destinationRoot=clean['destinationRoot'],actions=clean['actions'],allowProjects=bool(allow_projects),allowSymlinkTrash=bool(allow_symlink_trash),output=[],verified=0,error=None,reviewToken=secrets.token_urlsafe(24));self.jobs[ident]=j;self._save(j);p=self._folder(ident)/'plan.json';p.write_text(json.dumps(clean,ensure_ascii=False));os.chmod(p,0o600);self._start(j,'verify');return self.public(j)
+   clean=self.canonical(plan,bool(allow_projects),bool(allow_symlink_trash));ident=uuid.uuid4().hex;j=dict(id=ident,createdAt=time.time(),scannedAt=self.manifest['scannedAt'],state='verifying',destinationRoot=clean['destinationRoot'],actions=clean['actions'],allowProjects=bool(allow_projects),allowSymlinkTrash=bool(allow_symlink_trash),output=[],verified=0,error=None,reviewToken=secrets.token_urlsafe(24));self.jobs[ident]=j;self._save(j);p=self._folder(ident)/'plan.json';p.write_text(json.dumps(clean,ensure_ascii=False));os.chmod(p,0o600);self._start(j,'verify');return self.public(j)
  def command(self,j,mode):
   folder=self._folder(j['id']);cmd=[sys.executable,str(self.engine_path)];cmd+=['--undo',str(folder/'undo-log.jsonl')] if mode=='undo' else [str(folder/'plan.json'),'--log',str(folder/'undo-log.jsonl')];cmd+=['--source-root',str(self.root),'--destination-root',j['destinationRoot']]
   if j['allowProjects']:cmd+=['--allow-project-actions']
@@ -159,6 +168,7 @@ class Execution:
   threading.Thread(target=work,daemon=True).start()
  def operate(self,ident,mode,review_token,scope='all'):
   with self.lock:
+   if self.refreshing:raise ValueError('The folder scan is refreshing. Wait for it to finish before changing files.')
    if scope not in ('all','trash','move'):raise ValueError('Choose All, Trash, or Move actions.')
    if any(j['state'] in BUSY for j in self.jobs.values()):raise ValueError('An operation is already running.')
    j=self.jobs.get(ident)

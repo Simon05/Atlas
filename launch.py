@@ -5,10 +5,12 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT/'app'))
 from launch_organizer import make_server
+from atlas_snapshots import snapshot_folder
 
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--port',type=int,default=8765);p.add_argument('--no-browser',action='store_true');p.add_argument('--data-dir',type=Path,default=ROOT/'.atlas');args=p.parse_args();data=args.data_dir.resolve();data.mkdir(parents=True,exist_ok=True)
- if (data/'scan.json').exists():manifest=json.loads((data/'scan.json').read_text())
+ current=snapshot_folder(data)
+ if (current/'scan.json').exists():manifest=json.loads((current/'scan.json').read_text())
  else:
   manifest=dict(version=1,bootstrap=True,root=str(Path.home()/'Downloads'),home=str(Path.home()),scannedAt=time.time(),units=[],records=[],duplicates=[],zipMatches=[],fontFamilies={},applications=[],errors=[],zipErrors=[],limitations=[])
   safe=lambda x:json.dumps(x).replace('<','\\u003c');page=(ROOT/'app'/'atlas-template.html').read_text().replace('__SNAPSHOT__',safe(manifest)).replace('__THUMBNAILS__','{}').replace('__CONNECTION_DATA__','null');(data/'Downloads Organizer.html').write_text(page)

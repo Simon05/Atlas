@@ -26,5 +26,6 @@ jobs:
         run: |
           node --check work/atlas.js
           node tests/cleanup.cjs
+          node tests/refresh_state.cjs
       - name: Check scanner and recoverable operations
         run: python3 -m unittest discover -s tests
