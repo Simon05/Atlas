@@ -31,7 +31,7 @@ so you can recognize what you have and choose what belongs.
 
 Shift-click a range, ⌘/Ctrl-click to add, or drag across the gaps to box-select.
 Double-click a card to look inside. **K / M / T** mark decisions; **⌘Z** undoes a mark.
-Switch scanned folders without losing their individual plans.
+Switch scanned folders without losing their individual plans. Use **Refresh scan** in the header after changing files outside Atlas. Missing items disappear, new files appear, unchanged decisions stay, and changed content returns to review. The previous scan and execution history remain available.
 
 <details>
 <summary>See the Connections map</summary>
@@ -146,7 +146,7 @@ control what a separate agent reads or transmits.
 
 ### Current limits
 
-- Scans are snapshots; reopening a saved folder does not silently rescan it.
+- Scans are snapshots; use **Refresh scan** to update the current folder. Refreshing is read-only and can be cancelled. Changed items need a new decision; previous decisions can be downloaded from the refresh summary or Your plan.
 - Projects outside the scan, dynamic references and unsupported formats can be missed.
 - Items containing symbolic links require a per-item Trash override and final confirmation. Atlas moves the intact item without following its links; targets stay untouched. Link destinations are checked again before applying and restoring. Moving linked items remains blocked.
 - Missing items can be removed from the plan together after checking; this never changes files.

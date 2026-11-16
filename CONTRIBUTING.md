@@ -25,6 +25,7 @@ alone, or omit it to refresh their interface while retaining scans and previews.
 python3 scripts/build.py --template-only
 node --check work/atlas.js
 node tests/cleanup.cjs
+node tests/refresh_state.cjs
 python3 -m unittest discover -s tests
 ```
 

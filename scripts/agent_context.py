@@ -1,9 +1,11 @@
 """Export metadata for proposal-only AI refinement. Never changes scanned files."""
-import argparse,json
+import argparse,json,sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'app'))
+from atlas_snapshots import snapshot_folder
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--list',action='store_true');p.add_argument('--source',default='downloads');p.add_argument('--out',type=Path);args=p.parse_args();scans={'downloads':ROOT/'.atlas'/'scan.json'};scans.update({f.parent.name:f for f in (ROOT/'.atlas'/'sources').glob('*/scan.json')})
+ p=argparse.ArgumentParser(description=__doc__);p.add_argument('--list',action='store_true');p.add_argument('--source',default='downloads');p.add_argument('--out',type=Path);args=p.parse_args();scans={'downloads':snapshot_folder(ROOT/'.atlas')/'scan.json'};scans.update({f.parent.name:snapshot_folder(f.parent)/'scan.json' for f in (ROOT/'.atlas'/'sources').glob('*/scan.json')})
  if args.list:
   for ident,f in scans.items():
    if f.exists():print(ident,json.loads(f.read_text())['root'])

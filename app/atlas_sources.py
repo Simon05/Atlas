@@ -5,18 +5,21 @@ from atlas_execution import Execution
 from apply_plan import no_links
 from atlas_scan import scan
 from atlas_relations import build_relations
+from atlas_snapshots import snapshot_folder,publish_snapshot
 class Sources:
  def __init__(self,manifest,here,execution=None,app_dir=None):
   self.here=Path(here).resolve();self.app_dir=Path(app_dir).resolve() if app_dir else self.here;self.folder=self.here/'sources';self.lock=threading.RLock();self.scans={};self.contexts={};self.cancel=threading.Event()
   no_links(self.folder)
-  service=execution or Execution(manifest,here)
-  self.contexts['downloads']={'manifest':manifest,'service':service,'here':self.here,'name':Path(manifest['root']).name,'id':'downloads'}
+  current=snapshot_folder(self.here)
+  if current!=self.here:manifest=json.loads((current/'scan.json').read_text());execution=None
+  service=execution or Execution(manifest,here,engine_path=self.app_dir/'apply_plan.py')
+  self.contexts['downloads']={'manifest':manifest,'service':service,'here':current,'storage':self.here,'name':Path(manifest['root']).name,'id':'downloads'}
   if self.folder.exists():
    for p in self.folder.glob('*/scan.json'):
     try:
      ident=p.parent.name
      if len(ident)!=20 or any(c not in '0123456789abcdef' for c in ident) or p.is_symlink():continue
-     no_links(p);d=json.loads(p.read_text());self.contexts[ident]={'manifest':d,'service':Execution(d,p.parent,engine_path=self.app_dir/'apply_plan.py'),'here':p.parent,'name':Path(d['root']).name,'id':ident}
+     no_links(p);current=snapshot_folder(p.parent);d=json.loads((current/'scan.json').read_text());self.contexts[ident]={'manifest':d,'service':Execution(d,p.parent,engine_path=self.app_dir/'apply_plan.py'),'here':current,'storage':p.parent,'name':Path(d['root']).name,'id':ident}
     except (ValueError,OSError,KeyError):continue
  def get(self,ident):
   with self.lock:
@@ -42,10 +45,16 @@ class Sources:
   if p==Path.home() or p in Path.home().parents or any(p==Path(n) or Path(n) in p.parents for n in ('/System','/Library','/Applications','/private','/dev','/proc','/Volumes')):raise ValueError('Choose a personal folder such as Documents or a project collection. System folders and the entire home folder are not scanned.')
   if p==self.here or self.here in p.parents or (self.app_dir!=self.here and (p==self.app_dir.parent or self.app_dir in p.parents)):raise ValueError('Choose your files folder, outside the Atlas application folder.')
   return p
- def start(self,value):
+ def refresh(self,ident):
+  context=self.get(ident)
+  if context['manifest'].get('bootstrap'):raise ValueError('Choose and scan a folder first.')
+  return self.start(context['manifest']['root'],refresh_id=ident)
+ def start(self,value,refresh_id=None):
   root=self.validate(value)
   with self.lock:
-   for c in self.contexts.values():
+   original=self.get(refresh_id) if refresh_id else None
+   if original and Path(original['manifest']['root'])!=root:raise ValueError('The refresh does not match this folder.')
+   for c in ([] if original else self.contexts.values()):
     if c['manifest'].get('bootstrap'):continue
     old=Path(c['manifest']['root'])
     if root==old:return {'existing':c['id']}
@@ -54,14 +63,23 @@ class Sources:
      if c['id']!='downloads':raise ValueError('This overlaps another scanned folder. Open that folder instead, or choose a separate folder to keep plans independent.')
      if old in root.parents:raise ValueError('This is already inside Downloads. Use its existing plan to keep folder units intact.')
    if any(j['state']=='scanning' for j in self.scans.values()):raise ValueError('One scan is already running. Let it finish or cancel it first.')
-   ident=hashlib.sha256(str(root).encode()).hexdigest()[:20];job={'id':uuid.uuid4().hex,'sourceId':ident,'root':str(root),'state':'scanning','phase':'inventory','message':'Starting a read-only scan…','completed':0,'total':0,'startedAt':time.time()};self.scans[job['id']]=job;self.cancel.clear()
+   if original:
+    with original['service'].lock:
+     if original['service'].snapshot()['busy']:raise ValueError('Wait for the current file operation to finish before refreshing.')
+     original['service'].refreshing=True
+   ident=refresh_id or hashlib.sha256(str(root).encode()).hexdigest()[:20];job={'id':uuid.uuid4().hex,'sourceId':ident,'root':str(root),'refresh':bool(original),'state':'scanning','phase':'inventory','message':'Refreshing this folder…' if original else 'Starting a read-only scan…','completed':0,'total':0,'startedAt':time.time()};self.scans[job['id']]=job;self.cancel.clear()
   def progress(**fields):
    with self.lock:job.update(fields)
   def worker():
-   folder=self.folder/ident
+   storage=original.get('storage',original['here']) if original else self.folder/ident
+   folder=storage/'snapshots'/job['id'] if original else storage
    try:
     # Exclude the running Atlas workspace when scanning a parent like Documents.
     d=scan(root,progress,self.cancel.is_set,exclude=[self.here.parent]);d['sourceId']=ident
+    if original:
+     before={u['path']:u['fingerprint'] for u in original['manifest']['units']};after={u['path']:u['fingerprint'] for u in d['units']};common=before.keys()&after.keys()
+     summary=dict(added=len(after.keys()-before.keys()),removed=len(before.keys()-after.keys()),changed=sum(before[p]!=after[p] for p in common),unchanged=sum(before[p]==after[p] for p in common))
+     d['refresh']={'previousScannedAt':original['manifest']['scannedAt'],'summary':summary};d['snapshotId']=job['id']
     try:
      from atlas_previews import previews
      thumbs=previews(d,progress,self.cancel.is_set)
@@ -74,10 +92,17 @@ class Sources:
     (folder/'Downloads Organizer.html').write_text(template.replace('__SNAPSHOT__',safe(d)).replace('__THUMBNAILS__',safe(thumbs)).replace('__CONNECTION_DATA__',safe(evidence)))
     # Publishing scan.json last makes only complete snapshots discoverable after restart.
     temp=folder/'scan.tmp';temp.write_text(json.dumps(d,ensure_ascii=False,separators=(',',':')));os.replace(temp,folder/'scan.json')
-    context={'manifest':d,'service':Execution(d,folder,engine_path=self.app_dir/'apply_plan.py'),'here':folder,'name':root.name,'id':ident}
-    with self.lock:self.contexts[ident]=context;job.update(state='ready',phase='complete',message='Your map is ready.',completed=len(d['units']),total=len(d['units']))
+    service=Execution(d,storage,engine_path=self.app_dir/'apply_plan.py')
+    if original:service.token=original['service'].token
+    context={'manifest':d,'service':service,'here':folder,'storage':storage,'name':root.name,'id':ident}
+    with self.lock:
+     if self.cancel.is_set():raise ValueError('Scan cancelled. No files were changed.')
+     if original:publish_snapshot(storage,job['id'])
+     self.contexts[ident]=context;job.update(state='ready',phase='complete',message='Refresh complete. Your files have not moved.' if original else 'Your map is ready.',completed=len(d['units']),total=len(d['units']),summary=d.get('refresh',{}).get('summary'))
    except Exception as e:
-    with self.lock:job.update(state='cancelled' if self.cancel.is_set() else 'failed',message=str(e))
+    with self.lock:
+     if original:original['service'].refreshing=False
+     job.update(state='cancelled' if self.cancel.is_set() else 'failed',message=str(e))
   threading.Thread(target=worker,daemon=True).start();return {'scan':dict(job)}
  def stop(self,ident):
   with self.lock:

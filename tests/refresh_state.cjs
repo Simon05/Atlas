@@ -1,0 +1,16 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const c={Map,JSON,Error,D:{}};vm.createContext(c);vm.runInContext(fs.readFileSync('ui/scan-state.js','utf8'),c);
+const unit=(path,fingerprint,warnings=[])=>({path,fingerprint,warnings,hashComplete:true,locked:false});
+const old={scannedAt:1,units:[unit('keep','same'),unit('change','old'),unit('gone','removed')]};
+let saved={root:'/Example/Sorted',folders:[],decisions:{keep:{status:'Trash',reviewed:true},change:{status:'Move',target:'folder',reviewed:true,allowSymlinkTrash:true,discardRetained:true,reviewedCopies:['other']},gone:{status:'Keep'}},analysis:{keep:{reason:'Context'},change:{reason:'Old context'}}};
+c.saved=saved;c.old=old;vm.runInContext('bindSnapshotIdentity(saved,old)',c);
+const before=JSON.stringify(saved),fresh={scannedAt:2,refresh:{previousScannedAt:1},units:[unit('keep','same'),unit('change','new'),unit('added','new-item')]};c.fresh=fresh;
+let result=vm.runInContext('reconcileSnapshotState(saved,fresh)',c);
+assert.equal(JSON.stringify(saved),before,'Reconciliation must not mutate the recovery copy');
+assert.equal(result.state.root,'/Example/Sorted');assert.equal(result.state.decisions.keep.status,'Trash');assert.equal(result.state.decisions.keep.reviewed,true);
+assert.equal(result.state.decisions.change.status,'Undecided');assert.equal(result.state.decisions.change.target,null);assert.equal(result.state.decisions.change.allowSymlinkTrash,false);assert.equal(result.state.decisions.change.discardRetained,false);
+assert(!('gone' in result.state.decisions));assert(!('added' in result.state.decisions));assert('keep' in result.state.analysis);assert(!('change' in result.state.analysis));assert.equal(result.report.kept,1);assert.equal(result.report.review,1);assert.equal(result.report.removedDecisions,1);
+c.saved=result.state;result=vm.runInContext('reconcileSnapshotState(saved,fresh)',c);assert.equal(result.changed,false,'Reloading the refreshed snapshot must be idempotent');
+c.saved={root:'/Example/Sorted',folders:[],decisions:{keep:{status:'Trash'}}};result=vm.runInContext('reconcileSnapshotState(saved,fresh)',c);assert.equal(result.state.decisions.keep.status,'Undecided','Unbound legacy marks must not authorize actions after refresh');
+c.saved={root:'/Example/Sorted',folders:[],decisions:{keep:{status:'Trash'}}};vm.runInContext('bindSnapshotIdentity(saved,old)',c);c.fresh={scannedAt:3,refresh:{},units:[unit('keep','same',['Known reference from another project'])]};result=vm.runInContext('reconcileSnapshotState(saved,fresh)',c);assert.equal(result.state.decisions.keep.status,'Undecided','New reference risks need fresh review even if bytes match');
+console.log('Refresh decisions pass: unchanged marks kept, missing entries removed, replaced content and changed evidence need review, recovery copy intact, and reloads idempotent.');

@@ -146,6 +146,7 @@ def scan(root,progress=lambda **kwargs:None,cancelled=lambda:False,exclude=()):
   u=units[m['zip'].split('/')[0]]
   if u['path']==m['zip'] and not u['locked']:u.update(suggestion='Trash',confidence='High',reason='All non-metadata ZIP files match extracted folder '+m['folder']+' by size and SHA-256. Keep the extracted folder.',zipKeeper=m['folder'])
  result={'version':1,'root':str(ROOT),'home':str(Path.home()),'scannedAt':time.time(),'units':list(units.values()),'records':records,'duplicates':dupgroups,'zipMatches':zipmatches,'fontFamilies':dict(families),'applications':apps,'errors':errors,'zipErrors':ziperrors,'limitations':['Project membership is inferred from folder containment; external and absolute links are not exhaustively resolved.','ZIP matches compare basename/root-name candidate folders and exclude macOS metadata; nonmatching names are not exhaustively searched.','DMG matches use installer and installed application names, not mounted image contents.','All top-level folders are decision units to preserve project and asset relationships. Symbolic links are not followed. Linked units require explicit Trash confirmation; moving them remains blocked.']}
+ result['decisionIdentityVersion']=1
  result['excluded']=excluded
  for u in result['units']:
   if any(p==u['path'] or p.startswith(u['path']+'/') for p in excluded):
